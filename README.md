@@ -20,112 +20,194 @@ INSTALLED_APPS = [
 
 ## 1. Write the boundary — the part you review
 
+Monty does no IO of its own: no files, no network, no database. Whatever the generated code reads or writes, it does
+through the host functions the class gives it — so the class decides exactly how far the code reaches.
+
+Say a customer's orders are to be labelled by their amount. The code doing it is the LLM's; the database is not. It
+gets two functions: one reading the customer's orders, as plain rows, and one saving labels — of that customer's
+orders, and of two values only. No model instance, queryset or connection makes it to the sandbox.
+
+```python
+# myapp/models.py
+class Customer(models.Model):
+    name = models.CharField(max_length=200)
+
+
+class Order(models.Model):
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE)
+    created = models.DateTimeField()
+    amount = models.IntegerField()
+    label = models.CharField(max_length=20, blank=True)
+```
+
 ```python
 # myapp/tasks.py
+import datetime
 import typing
-from datetime import timedelta
+
+from django.utils import timezone
 
 from django_deluxe.sandbox import sandboxed
+from myapp.models import Customer, Order
 
 
-class Video(typing.NamedTuple):
-    article_id: int
-    duration: timedelta
+class OrderRow(typing.NamedTuple):
+    id: int
+    created: datetime.datetime
+    amount: int
 
 
 @sandboxed
-class TotalDuration:
+class LabelOrders:
     """
-    The total duration of `get_videos()` of at least `minimum`, in seconds, times `factor`. Call `add_note()` for
-    every video left out, with its article id and the text `too short`.
+    Label the orders of `get_orders()` created in the last `days` days before `now`: `large` if their amount is over
+    1 000, `small` if it is under 10. Save the labels with one call of `save_labels()` and return how many there are.
     """
 
-    factor: int  # a value: bound as a global in the sandbox
+    now: datetime.datetime  # a value: bound as a global in the sandbox
 
-    def __init__(self, videos: list[Video], factor: int):
-        self._videos = videos  # private: never reaches the sandbox
-        self.factor = factor
-        self.notes = []
+    def __init__(self, customer: Customer):
+        self._orders = Order.objects.filter(customer=customer)  # private: never reaches the sandbox
+        self.now = timezone.now()
 
-    def __call__(self, minimum: timedelta) -> float:  # the entry function's signature
+    def __call__(self, days: int) -> int:  # the entry function's signature
         ...
 
-    def get_videos(self) -> list[Video]:  # a host function
-        """Every video, in no particular order."""
-        return self._videos
+    def get_orders(self, since: datetime.datetime) -> list[OrderRow]:  # a host function
+        """The orders of the customer created since `since`, oldest first."""
+        rows = self._orders.filter(created__gte=since).order_by('created')
+        return [OrderRow(*row) for row in rows.values_list('id', 'created', 'amount')]
 
-    def add_note(self, note: dict[str, typing.Any]) -> None:
-        self.notes.append(note)
+    def save_labels(self, labels: dict[int, typing.Literal['large', 'small']]) -> None:
+        """Order id to its label. An order not of the customer is skipped."""
+        for label in ('large', 'small'):
+            ids = [order_id for order_id, order_label in labels.items() if order_label == label]
+            self._orders.filter(id__in=ids).update(label=label)
 ```
+
+The host functions enforce the scope themselves: `save_labels()` updates through the customer's queryset, so an id
+the code makes up — or takes from elsewhere — changes nothing. Saving in one call rather than per order also keeps
+the run within the host calls Monty allows (see [Resource limits](#resource-limits)).
 
 Every public name must be typed with something that can cross into the sandbox — scalars, `datetime`s, containers,
-`Literal`, `NamedTuple`, `TypedDict`, pydantic models and dataclasses. Anything else fails when the class is first used.
+`Literal`, `NamedTuple`, `TypedDict`, pydantic models and dataclasses. Anything else — a Django model, a queryset —
+fails when the class is first used, so the ORM cannot leak into the boundary by accident.
 
-## 2. Generate the code
+## 2. Write the stubs
 
-The prompt is rendered from the class — its docstring, the entry function's signature, the stubs of every public name
-and the rules of Monty's Python subset:
-
-```console
-$ ./manage.py deluxe_sandbox_prompt myapp.tasks
-Write the Python module `.../myapp/generated/tasks.py`. It runs in Monty, a sandboxed interpreter of a subset of Python 3.14.
-
-# The entry functions it defines
-
-## `total_duration`
-
-    def total_duration(minimum: datetime.timedelta) -> float
-
-It may use `add_note`, `get_videos`, `factor` — and nothing else of the stubs.
-...
-```
-
-Hand it to the LLM of your choice; commit what it writes to `myapp/generated/tasks.py`. The module is type-checked
-against the stubs every time it runs, so code reaching for something that is not there fails before it does anything.
-
-## 3. Let the IDE know the injected names
+The generated module lives in `myapp/generated/tasks.py`. Create it empty and let `deluxe_stubs` write the stub
+block into it: the names the sandbox binds, for the IDE and the linters, which would see them undefined otherwise.
 
 ```console
+$ mkdir -p myapp/generated && touch myapp/generated/tasks.py
 $ ./manage.py deluxe_stubs          # writes the block into every generated module
-$ ./manage.py deluxe_stubs --check  # for CI: fails if a block is missing or stale
+Updated .../myapp/generated/tasks.py
 ```
 
 ```python
 # myapp/generated/tasks.py
-from datetime import timedelta
-
 ### <django-deluxe-stubs>
 # For the IDE and the linters only: the sandbox strips this block and binds these names itself.
 # A pydantic model or a dataclass crosses as a dict of its JSON form, not as an instance: where a name below says
 # "dict", the class is only there to look the dict's shape up in.
 # isort: off
-from myapp.tasks import TotalDuration
-from myapp.tasks import Video
+from myapp.tasks import LabelOrders
+from myapp.tasks import OrderRow
 
-# TotalDuration: `total_duration()`
-add_note = TotalDuration.add_note
-get_videos = TotalDuration.get_videos
-factor = TotalDuration.factor
+# LabelOrders: `label_orders()`
+get_orders = LabelOrders.get_orders
+save_labels = LabelOrders.save_labels
+now = LabelOrders.now
 # isort: on
+### </django-deluxe-stubs>
+```
+
+Run it again whenever the boundary changes; `./manage.py deluxe_stubs --check` fails in CI if a block is missing or
+stale.
+
+## 3. Generate the code
+
+The prompt is rendered from the class — its docstring, the entry function's signature, the stubs of every public name
+and the rules of Monty's Python subset — and tells the LLM which file to write. Pipe it to Claude Code, letting it
+edit files:
+
+```console
+$ ./manage.py deluxe_sandbox_prompt myapp.tasks | claude -p --permission-mode acceptEdits
+```
+
+The prompt, for reference:
+
+````console
+$ ./manage.py deluxe_sandbox_prompt myapp.tasks
+Write the Python module `.../myapp/generated/tasks.py`. It runs in Monty, a sandboxed interpreter of a subset of Python 3.14.
+
+# The entry functions it defines
+
+## `label_orders`
+
+    def label_orders(days: int) -> int
+
+It may use `get_orders`, `save_labels`, `now` — and nothing else of the stubs.
+
+Label the orders of `get_orders()` created in the last `days` days before `now`: ...
+
+# What the code can use
+...
+```python
+import datetime
+import typing
+
+class OrderRow(typing.NamedTuple):
+    id: int
+    created: datetime.datetime
+    amount: int
+
+now: datetime.datetime
+
+def get_orders(since: datetime.datetime) -> list[OrderRow]:
+    """
+    The orders of the customer created since `since`, oldest first.
+    """
+
+def save_labels(labels: dict[int, typing.Literal['large', 'small']]) -> None:
+    """
+    Order id to its label. An order not of the customer is skipped.
+    """
+```
+...
+````
+
+Claude writes the module around the stub block; review the diff and commit it:
+
+```python
+# myapp/generated/tasks.py
+import typing
+from datetime import timedelta
+
+### <django-deluxe-stubs>
+...
 ### </django-deluxe-stubs>
 
 
-def total_duration(minimum: timedelta) -> float:
-    total = 0.0
-    for video in get_videos():
-        if video.duration < minimum:
-            add_note({'article_id': video.article_id, 'text': 'too short'})
-            continue
-        total += video.duration.total_seconds()
-    return total * factor
+def label_orders(days: int) -> int:
+    labels: dict[int, typing.Literal['large', 'small']] = {}
+    for order in get_orders(now - timedelta(days=days)):
+        if order.amount > 1_000:
+            labels[order.id] = 'large'
+        elif order.amount < 10:
+            labels[order.id] = 'small'
+    save_labels(labels)
+    return len(labels)
 ```
+
+The module is type-checked against the stubs every time it runs, so code reaching for something that is not there —
+or saving a label other than the two — fails before it does anything.
 
 ## 4. Call it
 
 ```python
-total_duration = TotalDuration([Video(1, timedelta(seconds=30)), Video(2, timedelta(minutes=2))], factor=2)
-total_duration(timedelta(minutes=1))  # 240.0, computed in Monty
-total_duration.notes                  # [{'article_id': 1, 'text': 'too short'}]
+label_orders = LabelOrders(customer)  # this week: orders of 5 000, 50 and 3
+label_orders(days=7)                  # 2, computed in Monty; `large` and `small` are saved
 ```
 
 `print()` in the generated code goes to the logger of the generated module, `myapp.generated.tasks`.
@@ -133,29 +215,36 @@ total_duration.notes                  # [{'article_id': 1, 'text': 'too short'}]
 ## 5. Test it
 
 Tests of the generated code run it in Monty — not on CPython, where it would pass on things Monty lacks — with fakes
-standing in for the instance:
+standing in for the instance, so they need no database:
 
 ```python
+from django.utils import timezone
+
 from django_deluxe.testing import check_generated, run_generated
 
 
-def test_short_videos_are_noted():
-    notes = []
+def test_large_and_small_orders_are_labelled():
+    now = timezone.now()
+    saved = []
 
     result = run_generated(
-        TotalDuration, 'total_duration', timedelta(minutes=1),
-        namespace={'get_videos': lambda: [Video(1, timedelta(seconds=30))], 'add_note': notes.append, 'factor': 1},
+        LabelOrders, 'label_orders', 7,
+        namespace={
+            'get_orders': lambda since: [OrderRow(1, now, 5_000), OrderRow(2, now, 50)],
+            'save_labels': saved.append,
+            'now': now,
+        },
     )
 
-    assert result == 0.0
-    assert notes == [{'article_id': 1, 'text': 'too short'}]
+    assert result == 1
+    assert saved == [{1: 'large'}]
 
 
 def test_contract():  # the one test on the reviewed side
-    check_generated(TotalDuration)  # exists, type-checks against the boundary, defines every entry function
+    check_generated(LabelOrders)  # exists, type-checks against the boundary, defines every entry function
 ```
 
-`run_generated()` calls helpers of the generated module too: `run_generated(TotalDuration, '_my_helper', ...)`.
+`run_generated()` calls helpers of the generated module too: `run_generated(LabelOrders, '_my_helper', ...)`.
 
 ## Pydantic models and dataclasses
 
