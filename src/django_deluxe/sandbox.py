@@ -297,7 +297,7 @@ class SandboxedModule:
         def print_callback(stream, text):
             logger.info('%s', text.rstrip('\n'))
 
-        source = strip_stub_block(self.generated_path.read_text())
+        source = strip_stub_block(self.generated_path.read_text(encoding='utf-8'))
         with get_pool().checkout(
             script_name=str(self.generated_path),
             limits=limits,

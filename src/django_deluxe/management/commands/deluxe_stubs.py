@@ -20,13 +20,13 @@ class Command(BaseCommand):
             path = sandboxed_module.generated_path
             if not sandboxed_module.definitions:
                 raise CommandError(f'{path}: no @sandboxed class in {sandboxed_module.name}')
-            source = path.read_text()
+            source = path.read_text(encoding='utf-8')
             updated_source = update_stub_block(source, sandboxed_module.stub_block)
             if updated_source == source:
                 continue
             stale_paths.append(path)
             if not options['check']:
-                path.write_text(updated_source)
+                path.write_text(updated_source, encoding='utf-8')
                 self.stdout.write(f'Updated {path}')
         if options['check'] and stale_paths:
             raise CommandError('Stub blocks out of date: ' + ', '.join(map(str, stale_paths)))
