@@ -1,0 +1,28 @@
+[project]
+name = "django-deluxe"
+version = "0.1.0"
+description = "Run LLM-generated code in the Monty sandbox, behind a reviewed boundary"
+readme = "README.md"
+authors = [
+    { name = "Filip Sedlak", email = "filip@sedlakovi.org" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "django>=6.0",
+    "pydantic>=2",
+    "pydantic-monty~=1.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-django>=4.14.0",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+pythonpath = ["."]
