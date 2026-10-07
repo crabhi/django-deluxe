@@ -150,7 +150,7 @@ def test_a_name_declared_differently_in_two_classes_is_refused():
 
 
 def test_prompt_has_every_task_and_the_stubs(capsys):
-    call_command('sandbox_prompt', 'tests.sample_app.tasks')
+    call_command('deluxe_sandbox_prompt', 'tests.sample_app.tasks')
     prompt = capsys.readouterr().out
 
     assert prompt == SandboxedModule.of('tests.sample_app.tasks').get_prompt()
