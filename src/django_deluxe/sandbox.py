@@ -94,7 +94,7 @@ def sandboxed(cls=None, /, *, limits=None):
 
 
 def get_definition(cls: type) -> 'SandboxDefinition':
-    return cls._sandbox_definition
+    return cls._sandbox_definition  # type: ignore[attr-defined]
 
 
 @dataclasses.dataclass
@@ -193,7 +193,7 @@ def _make_call(definition: SandboxDefinition):
         namespace = {name: getattr(self, name) for name in definition.boundary.names}
         return definition.run(namespace, definition.entry_name, args, kwargs)
 
-    __call__.__signature__ = definition.call_signature
+    __call__.__signature__ = definition.call_signature  # type: ignore[attr-defined]
     __call__.__doc__ = definition.cls.__call__.__doc__
     return __call__
 
@@ -480,7 +480,7 @@ class Boundary:
         body = f'    """\n{_indent(inspect.cleandoc(docstring))}\n    """' if docstring else '    ...'
         return f'def {name}{self.format_signature(host_function.signature, skip_self=True)}:\n{body}'
 
-    def _render_type(self, type_: type) -> str:
+    def _render_type(self, type_: Any) -> str:  # a TypedDict or a NamedTuple class
         hints = typing.get_type_hints(type_)
         lines = []
         if type_.__doc__ and not type_.__doc__.startswith(f'{type_.__name__}('):  # not NamedTuple's own

@@ -71,7 +71,7 @@ def update_stub_block(source: str, stub_block: str) -> str:
         is_docstring = isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and insert_at == 0
         if not (isinstance(node, ast.Import | ast.ImportFrom) or is_docstring):
             break
-        insert_at = node.end_lineno
+        insert_at = node.end_lineno or 0
     return ''.join(lines[:insert_at]) + ('\n' if insert_at else '') + stub_block + '\n\n' + ''.join(lines[insert_at:]).lstrip('\n')
 
 
