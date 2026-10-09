@@ -210,7 +210,10 @@ label_orders = LabelOrders(customer)  # this week: orders of 5 000, 50 and 3
 label_orders(days=7)                  # 2, computed in Monty; `large` and `small` are saved
 ```
 
-`print()` in the generated code goes to the logger of the generated module, `myapp.generated.tasks`.
+`print()` in the generated code goes to the logger of the generated module, `myapp.generated.tasks`. Every host
+function call is logged at the debug level by `django_deluxe.sandbox` — its arguments, its return value or the
+exception it raised, with its traceback, which the sandbox loses; a value whose `repr()` is longer than 1000
+characters is logged as `ClassName(...)`.
 
 ## 5. Test it
 

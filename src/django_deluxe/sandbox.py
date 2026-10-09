@@ -59,6 +59,9 @@ DATETIME_TYPES = (datetime.date, datetime.datetime, datetime.timedelta)
 CONTAINER_TYPES = (list, tuple, dict, set, frozenset)
 ARGUMENTS_NAME = '__deluxe_arguments'
 KEYWORD_ARGUMENTS_NAME = '__deluxe_keyword_arguments'
+MAX_LOGGED_REPR = 1000  # characters of a host function's argument or return value in the debug log
+
+logger = logging.getLogger(__name__)
 
 _definitions: list['SandboxDefinition'] = []
 
@@ -144,17 +147,24 @@ class SandboxDefinition:
         if unknown_names:
             raise ValueError(f'Not on the boundary of {self.cls.__qualname__}: {", ".join(sorted(unknown_names))}')
 
+        qualified_name = f'{self.module.generated_module}.{function_name}'
+        logger.debug('%s', _LoggedCall(qualified_name, arguments, keyword_arguments))
         if function_name == self.entry_name:  # a helper's types are the generated code's own
             bound_arguments = self.call_signature.bind(None, *arguments, **keyword_arguments)
             _convert_arguments(bound_arguments, self.call_signature, to_sandbox)
             arguments, keyword_arguments = bound_arguments.args[1:], bound_arguments.kwargs
-        with self.module.feed(self._wrap_namespace(namespace), self.limits) as feed_run:
-            result = feed_run(
-                f'{function_name}(*{ARGUMENTS_NAME}, **{KEYWORD_ARGUMENTS_NAME})',
-                inputs={ARGUMENTS_NAME: list(arguments), KEYWORD_ARGUMENTS_NAME: keyword_arguments},
-            )
+        try:
+            with self.module.feed(self._wrap_namespace(namespace), self.limits) as feed_run:
+                result = feed_run(
+                    f'{function_name}(*{ARGUMENTS_NAME}, **{KEYWORD_ARGUMENTS_NAME})',
+                    inputs={ARGUMENTS_NAME: list(arguments), KEYWORD_ARGUMENTS_NAME: keyword_arguments},
+                )
+        except Exception:
+            logger.debug('%s raised', qualified_name)
+            raise
         if function_name == self.entry_name:
-            return from_sandbox(result, self.call_signature.return_annotation)
+            result = from_sandbox(result, self.call_signature.return_annotation)
+        logger.debug('%s returned %s', qualified_name, _LoggedRepr(result))
         return result
 
     def _wrap_namespace(self, namespace: dict[str, Any]) -> dict[str, Any]:
@@ -163,22 +173,59 @@ class SandboxDefinition:
         wrapped_namespace = {}
         for name, value in namespace.items():
             if name in self.boundary.functions:
-                wrapped_namespace[name] = _wrap_host_function(value, self.boundary.functions[name].signature)
+                wrapped_namespace[name] = _wrap_host_function(name, value, self.boundary.functions[name].signature)
             else:
                 wrapped_namespace[name] = to_sandbox(value, self.boundary.values[name])
         return wrapped_namespace
 
 
-def _wrap_host_function(function, signature: inspect.Signature):
-    """`signature` is of the method, `self` first; `function` may be the bound method or a fake standing in."""
+def _wrap_host_function(name: str, function, signature: inspect.Signature):
+    """
+    `signature` is of the method, `self` first; `function` may be the bound method or a fake standing in. A call is
+    logged at the debug level with the host's values: the arguments as converted, the value before it is.
+    """
 
     @functools.wraps(function)
     def host_function(*args, **kwargs):
         bound_arguments = signature.bind(None, *args, **kwargs)
         _convert_arguments(bound_arguments, signature, from_sandbox)
-        return to_sandbox(function(*bound_arguments.args[1:], **bound_arguments.kwargs), signature.return_annotation)
+        arguments, keyword_arguments = bound_arguments.args[1:], bound_arguments.kwargs
+        logger.debug('%s', _LoggedCall(name, arguments, keyword_arguments))
+        try:
+            result = function(*arguments, **keyword_arguments)
+        except Exception:
+            logger.debug('%s raised', name, exc_info=True)  # Monty passes on the message, not the traceback
+            raise
+        logger.debug('%s returned %s', name, _LoggedRepr(result))
+        return to_sandbox(result, signature.return_annotation)
 
     return host_function
+
+
+class _LoggedRepr:
+    """`repr()` of a value for the log, or of its class if too long — made only once the record is formatted."""
+
+    def __init__(self, value: Any):
+        self.value = value
+
+    def __str__(self) -> str:
+        representation = repr(self.value)
+        return representation if len(representation) <= MAX_LOGGED_REPR else f'{type(self.value).__qualname__}(...)'
+
+
+class _LoggedCall:
+    """`name(argument, …, key=argument)`, formatted only if the record is."""
+
+    def __init__(self, name: str, arguments: tuple, keyword_arguments: dict):
+        self.name = name
+        self.arguments = arguments
+        self.keyword_arguments = keyword_arguments
+
+    def __str__(self) -> str:
+        return f'{self.name}(' + ', '.join([
+            *(str(_LoggedRepr(value)) for value in self.arguments),
+            *(f'{key}={_LoggedRepr(value)}' for key, value in self.keyword_arguments.items()),
+        ]) + ')'
 
 
 def _convert_arguments(bound_arguments: inspect.BoundArguments, signature: inspect.Signature, convert) -> None:

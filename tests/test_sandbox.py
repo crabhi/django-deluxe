@@ -102,6 +102,43 @@ def test_run_generated_helper():
     assert run_generated(TotalDuration, '_seconds', VIDEOS[0]) == 30.0
 
 
+def test_host_calls_are_logged_at_debug(caplog):
+    with caplog.at_level(logging.DEBUG, logger='django_deluxe.sandbox'):
+        TotalDuration(VIDEOS[:1], factor=1)(timedelta(minutes=1))
+
+    assert caplog.messages == [
+        'tests.sample_app.generated.tasks.total_duration(datetime.timedelta(seconds=60))',
+        'get_videos()',
+        'get_videos returned [Video(article_id=1, duration=datetime.timedelta(seconds=30))]',
+        'get_video_title(1)',
+        "get_video_title returned 'Video 1'",
+        "add_note({'article_id': 1, 'text': 'too short'})",
+        'add_note returned None',
+        'tests.sample_app.generated.tasks.total_duration returned 0.0',
+    ]
+
+
+def test_a_long_repr_is_logged_as_its_class(caplog):
+    videos = [Video(article_id, timedelta(minutes=2)) for article_id in range(100)]
+
+    with caplog.at_level(logging.DEBUG, logger='django_deluxe.sandbox'):
+        run_generated(VideoCount, 'video_count', namespace={'get_videos': lambda: videos})
+
+    assert caplog.messages == [
+        'tests.sample_app.generated.tasks.video_count()',
+        'get_videos()',
+        'get_videos returned list(...)',
+        'tests.sample_app.generated.tasks.video_count returned 100',
+    ]
+
+
+def test_host_calls_are_not_logged_above_debug(caplog):
+    with caplog.at_level(logging.INFO, logger='django_deluxe.sandbox'):
+        TotalDuration(VIDEOS, factor=1)(timedelta(minutes=1))
+
+    assert caplog.messages == []
+
+
 def test_only_the_names_of_the_class_called_are_bound():
     with pytest.raises(ValueError, match='add_note'):
         run_generated(VideoCount, 'video_count', namespace={'add_note': print})
